@@ -31,10 +31,16 @@ func main() {
 
 	buf := make([]byte, 2000)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Println("Client goroutine panic:", r)
+			}
+		}()
+
 		for {
 			n, err := conn.Read(buf)
 			if err != nil {
-				log.Println("Read error from server:", err)
+				log.Println("[client] Read error from server:", err)
 				continue
 			}
 
@@ -42,12 +48,16 @@ func main() {
 
 			decrypted, err := vpnCrypto.Decrypt(buf[:n])
 			if err != nil {
-				log.Println("Decryption error:", err)
+				log.Println("[client] Decryption error:", err)
 				continue
 			}
 
-			fmt.Println("[client] decrypted packet length:", len(decrypted))
-			iface.Write(decrypted)
+			fmt.Printf("[client] decrypted packet (%d bytes): %x\n", len(decrypted), decrypted)
+
+			_, err = iface.Write(decrypted)
+			if err != nil {
+				log.Println("[client] TUN write error:", err)
+			}
 		}
 	}()
 

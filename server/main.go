@@ -18,42 +18,44 @@ func main() {
 
 	conn, err := net.ListenUDP("udp", &addr)
 	if err != nil {
-		log.Fatalf("UDP listen error: %v", err)
+		log.Fatalf("[server] UDP listen error: %v", err)
 	}
 	defer conn.Close()
 
-	fmt.Println("VPN server listening on UDP", addr.String())
+	fmt.Println("[server] VPN server listening on UDP", addr.String())
 
 	vpnCrypto, err := crypto.NewVPNCrypto(sharedKey)
 	if err != nil {
-		log.Fatalf("Crypto init error: %v", err)
+		log.Fatalf("[server] Crypto init error: %v", err)
 	}
 
 	buf := make([]byte, 2000)
 	for {
 		n, clientAddr, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			log.Println("Read error:", err)
+			log.Println("[server] Read error:", err)
 			continue
 		}
+
+		fmt.Printf("[server] Received %d bytes from %s\n", n, clientAddr)
 
 		decrypted, err := vpnCrypto.Decrypt(buf[:n])
 		if err != nil {
-			log.Println("Decryption failed:", err)
+			log.Println("[server] Decryption failed:", err)
 			continue
 		}
 
-		fmt.Printf("[>] %d bytes from %s\n", len(decrypted), clientAddr)
+		fmt.Printf("[>] Decrypted %d bytes from %s: %x\n", len(decrypted), clientAddr, decrypted)
 
 		encrypted, err := vpnCrypto.Encrypt(decrypted)
 		if err != nil {
-			log.Println("Encryption failed:", err)
+			log.Println("[server] Encryption failed:", err)
 			continue
 		}
 
 		_, err = conn.WriteToUDP(encrypted, clientAddr)
 		if err != nil {
-			log.Println("Write error:", err)
+			log.Println("[server] Write error:", err)
 		} else {
 			fmt.Printf("[<] Sent back %d bytes to %s\n", len(encrypted), clientAddr)
 		}
