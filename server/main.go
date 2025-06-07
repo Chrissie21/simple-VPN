@@ -9,6 +9,8 @@ import (
 	"log"
 	"math"
 	"net"
+	"os/exec"
+	"sync"
 	"time"
 
 	"github.com/Chrissie21/myproject/crypto"
@@ -16,6 +18,11 @@ import (
 
 var sharedKey = []byte("0123456789ABCDEF0123456789ABCDEF")
 var magic = []byte("VPN1")
+
+type ClientSession struct {
+	Addr     *net.UDPAddr
+	LastSeen time.Time
+}
 
 func main() {
 	addr := net.UDPAddr{
@@ -36,7 +43,8 @@ func main() {
 		log.Fatalf("[server] Crypto init error: %v", err)
 	}
 
-	clients := make(map[string]bool) // Track authenticated clients
+	clients := make(map[string]*ClientSession)
+	var clientMu sync.Mutex
 
 	buf := make([]byte, 2000)
 	for {
@@ -46,38 +54,80 @@ func main() {
 			continue
 		}
 
-		if !clients[clientAddr.String()] {
+		clientMu.Lock()
+		session, known := clients[clientAddr.String()]
+		clientMu.Unlock()
+
+		if !known {
 			if handleHandshake(conn, clientAddr, buf[:n]) {
-				clients[clientAddr.String()] = true
 				log.Println("[server] Handshake succeeded for", clientAddr)
+				session = &ClientSession{
+					Addr:     clientAddr,
+					LastSeen: time.Now(),
+				}
+				clientMu.Lock()
+				clients[clientAddr.String()] = session
+				clientMu.Unlock()
+
+				// Start per-client goroutine
+				go handleClientTraffic(conn, clientAddr, vpnCrypto)
 			} else {
 				log.Println("Handshake failed from", clientAddr)
 				continue
 			}
-		} else {
-			// Handle encrypted packets here
-			decrypted, err := vpnCrypto.Decrypt(buf[:n])
-			if err != nil {
-				log.Println("[server] Decryption failed:", err)
-				continue
-			}
-
-			fmt.Printf("[>] Decrypted %d bytes from %s: %x\n", len(decrypted), clientAddr, decrypted)
-
-			encrypted, err := vpnCrypto.Encrypt(decrypted)
-			if err != nil {
-				log.Println("[server] Encryption failed:", err)
-				continue
-			}
-
-			_, err = conn.WriteToUDP(encrypted, clientAddr)
-			if err != nil {
-				log.Println("[server] Write error:", err)
-			} else {
-				fmt.Printf("[<] Sent back %d bytes to %s\n", len(encrypted), clientAddr)
-			}
 		}
 	}
+}
+
+func handleClientTraffic(conn *net.UDPConn, clientAddr *net.UDPAddr, vpnCrypto *crypto.VPNCrypto) {
+	fmt.Println("[server] Handling traffic for", clientAddr)
+	buf := make([]byte, 2000)
+
+	for {
+		n, addr, err := conn.ReadFromUDP(buf)
+		if err != nil || addr.String() != clientAddr.String() {
+			continue
+		}
+
+		decrypted, err := vpnCrypto.Decrypt(buf[:n])
+		if err != nil {
+			log.Println("[server] Decryption failed:", err)
+			continue
+		}
+
+		fmt.Printf("[>] Decrypted %d bytes from %s: %x\n", len(decrypted), addr, decrypted)
+
+		// Forward to real internet using raw socket (simplified for now)
+		response, err := forwardToInternet(decrypted)
+		if err != nil {
+			log.Println("[server] Forward error:", err)
+			continue
+		}
+
+		encrypted, err := vpnCrypto.Encrypt(response)
+		if err != nil {
+			log.Println("[server] Encryption failed:", err)
+			continue
+		}
+
+		_, err = conn.WriteToUDP(encrypted, clientAddr)
+		if err != nil {
+			log.Println("[server] Write error:", err)
+		} else {
+			fmt.Printf("[<] Sent back %d bytes to %s\n", len(encrypted), clientAddr)
+		}
+	}
+}
+
+// Simplified: forward to the internet using ping (ICMP) for now
+func forwardToInternet(packet []byte) ([]byte, error) {
+	// TEMP: just test internet reachability
+	cmd := exec.Command("ping", "-c", "1", "8.8.8.8")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func handleHandshake(conn *net.UDPConn, addr *net.UDPAddr, data []byte) bool {
