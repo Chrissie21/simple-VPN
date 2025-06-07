@@ -1,15 +1,21 @@
 package main
 
 import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
+	"time"
 
 	"github.com/Chrissie21/myproject/crypto"
 	"github.com/songgao/water"
 )
 
 var sharedKey = []byte("0123456789ABCDEF0123456789ABCDEF")
+var magic = []byte("VPN1")
 
 func main() {
 	iface, err := water.New(water.Config{DeviceType: water.TUN})
@@ -23,6 +29,11 @@ func main() {
 		log.Fatalf("Failed to connect to VPN server: %v", err)
 	}
 	defer conn.Close()
+
+	err = sendHandshake(conn)
+	if err != nil {
+		log.Fatal("Handshake failed:", err)
+	}
 
 	vpnCrypto, err := crypto.NewVPNCrypto(sharedKey)
 	if err != nil {
@@ -78,4 +89,23 @@ func main() {
 
 		conn.Write(encrypted)
 	}
+}
+
+func sendHandshake(conn net.Conn) error {
+	ts := time.Now().Unix()
+	buf := new(bytes.Buffer)
+
+	buf.Write(magic)
+
+	binary.Write(buf, binary.BigEndian, ts)
+
+	mac := hmac.New(sha256.New, sharedKey)
+	mac.Write(magic)
+	binary.Write(mac, binary.BigEndian, ts)
+	hmacBytes := mac.Sum(nil)
+
+	buf.Write(hmacBytes)
+
+	_, err := conn.Write(buf.Bytes())
+	return err
 }
