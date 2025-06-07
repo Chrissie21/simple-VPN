@@ -5,60 +5,64 @@ import (
 	"log"
 	"net"
 
+	"github.com/Chrissie21/myproject/crypto"
 	"github.com/songgao/water"
 )
 
+var sharedKey = []byte("0123456789ABCDEF0123456789ABCDEF")
+
 func main() {
-	// Create a TUN interface
-	config := water.Config{
-		DeviceType: water.TUN,
-	}
-	iface, err := water.New(config)
+	iface, err := water.New(water.Config{DeviceType: water.TUN})
 	if err != nil {
-		log.Fatalf("TUN creation error: %v", err)
+		log.Fatalf("Failed to create TUN: %v", err)
 	}
 	fmt.Printf("TUN interface %s created.\n", iface.Name())
 
-	// UDP connection to VPN server
-	serverAddr := "127.0.0.1:8080"
-	conn, err := net.Dial("udp", serverAddr)
+	conn, err := net.Dial("udp", "127.0.0.1:8080")
 	if err != nil {
 		log.Fatalf("Failed to connect to VPN server: %v", err)
 	}
 	defer conn.Close()
 
-	fmt.Println("Connected to VPN server at", serverAddr)
+	vpnCrypto, err := crypto.NewVPNCrypto(sharedKey)
+	if err != nil {
+		log.Fatalf("Failed to init crypto: %v", err)
+	}
 
-	// read from TUN --> send over UDP
-	packet := make([]byte, 2000)
+	buf := make([]byte, 2000)
 	go func() {
 		for {
-			n, err := iface.Read(packet)
+			n, err := conn.Read(buf)
 			if err != nil {
-				log.Fatalf("Error reading from TUN: %v", err)
+				log.Println("Read error from server:", err)
+				continue
 			}
-			fmt.Printf("[>] Sending %d bytes to server\n", n)
 
-			_, err = conn.Write(packet[:n])
+			decrypted, err := vpnCrypto.Decrypt(buf[:n])
 			if err != nil {
-				log.Fatalf("Error sending UDP packet: %v", err)
+				log.Println("Decryption error:", err)
+				continue
 			}
+
+			iface.Write(decrypted)
 		}
 	}()
 
-	// Listen for incoming packets from the server
-	buf := make([]byte, 2000)
-	for {
-		n, err := conn.Read(buf)
-		if err != nil {
-			log.Fatalf("Error reading from server: %v", err)
-		}
-		fmt.Printf("[<] Received %d bytes from server\n", n)
+	fmt.Println("Connected to VPN server at 127.0.0.1:8080")
 
-		// Write the received packet to the TUN interface
-		if _, err := iface.Write(buf[:n]); err != nil {
-			log.Fatalf("Error writing to TUN interface: %v", err)
+	for {
+		n, err := iface.Read(buf)
+		if err != nil {
+			log.Println("Read error from TUN:", err)
+			continue
 		}
-		fmt.Printf("[>] Sent %d bytes to TUN interface\n", n)
+
+		encrypted, err := vpnCrypto.Encrypt(buf[:n])
+		if err != nil {
+			log.Println("Encryption error:", err)
+			continue
+		}
+
+		conn.Write(encrypted)
 	}
 }

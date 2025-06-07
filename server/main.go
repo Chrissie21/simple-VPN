@@ -6,6 +6,8 @@ import (
 	"net"
 )
 
+var sharedKey = []byte("0123456789ABCDEF0123456789ABCDEF")
+
 func main() {
 	// UDP listener
 	addr := net.UDPAddr{
