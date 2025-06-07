@@ -38,12 +38,15 @@ func main() {
 				continue
 			}
 
+			fmt.Printf("[client] received %d bytes from server\n", n)
+
 			decrypted, err := vpnCrypto.Decrypt(buf[:n])
 			if err != nil {
 				log.Println("Decryption error:", err)
 				continue
 			}
 
+			fmt.Println("[client] decrypted packet length:", len(decrypted))
 			iface.Write(decrypted)
 		}
 	}()
