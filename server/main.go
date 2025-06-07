@@ -4,12 +4,13 @@ import (
 	"fmt"
 	"log"
 	"net"
+
+	"github.com/Chrissie21/myproject/crypto"
 )
 
 var sharedKey = []byte("0123456789ABCDEF0123456789ABCDEF")
 
 func main() {
-	// UDP listener
 	addr := net.UDPAddr{
 		IP:   net.ParseIP("0.0.0.0"),
 		Port: 8080,
@@ -17,29 +18,44 @@ func main() {
 
 	conn, err := net.ListenUDP("udp", &addr)
 	if err != nil {
-		log.Fatalf("Failed to listen on UDP port 8080: %v", err)
+		log.Fatalf("UDP listen error: %v", err)
 	}
 	defer conn.Close()
 
-	fmt.Printf("VPN server listening on %s\n", addr.String())
+	fmt.Println("VPN server listening on UDP", addr.String())
 
-	// Receiving and echo packets
-	packet := make([]byte, 2000)
+	vpnCrypto, err := crypto.NewVPNCrypto(sharedKey)
+	if err != nil {
+		log.Fatalf("Crypto init error: %v", err)
+	}
+
+	buf := make([]byte, 2000)
 	for {
-		n, clientAddr, err := conn.ReadFromUDP(packet)
+		n, clientAddr, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			log.Printf("Read error: %v", err)
+			log.Println("Read error:", err)
 			continue
 		}
 
-		fmt.Printf("[>] Received %d bytes from %s\n", n, clientAddr)
-
-		// Echo packets back
-		_, err = conn.WriteToUDP(packet[:n], clientAddr)
+		decrypted, err := vpnCrypto.Decrypt(buf[:n])
 		if err != nil {
-			log.Printf("Write error: %v", err)
+			log.Println("Decryption failed:", err)
+			continue
+		}
+
+		fmt.Printf("[>] %d bytes from %s\n", len(decrypted), clientAddr)
+
+		encrypted, err := vpnCrypto.Encrypt(decrypted)
+		if err != nil {
+			log.Println("Encryption failed:", err)
+			continue
+		}
+
+		_, err = conn.WriteToUDP(encrypted, clientAddr)
+		if err != nil {
+			log.Println("Write error:", err)
 		} else {
-			fmt.Printf("[<] Echoed %d bytes back to %s\n", n, clientAddr)
+			fmt.Printf("[<] Sent back %d bytes to %s\n", len(encrypted), clientAddr)
 		}
 	}
 }
