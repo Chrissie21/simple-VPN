@@ -12,7 +12,6 @@ type VPNCrypto struct {
 	gcm cipher.AEAD
 }
 
-// new AES-GCM
 func NewVPNCrypto(key []byte) (*VPNCrypto, error) {
 	if len(key) != 32 {
 		return nil, errors.New("key must be 32 bytes")
@@ -31,7 +30,6 @@ func NewVPNCrypto(key []byte) (*VPNCrypto, error) {
 	return &VPNCrypto{gcm: gcm}, nil
 }
 
-// Encrypt data using AES-GCM
 func (v *VPNCrypto) Encrypt(plain []byte) ([]byte, error) {
 	nonce := make([]byte, v.gcm.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
@@ -42,7 +40,6 @@ func (v *VPNCrypto) Encrypt(plain []byte) ([]byte, error) {
 	return append(nonce, ciphertext...), nil
 }
 
-// Decrypt data using AES-GCM
 func (v *VPNCrypto) Decrypt(ciphertext []byte) ([]byte, error) {
 	ns := v.gcm.NonceSize()
 	if len(ciphertext) < ns {
