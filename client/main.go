@@ -2,8 +2,7 @@ package main
 
 import (
 	"bytes"
-	"crypto/hmac"
-	"crypto/sha256"
+	"crypto/rsa"
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -16,159 +15,120 @@ import (
 	"github.com/songgao/water"
 )
 
-var sharedKey = []byte("0123456789ABCDEF0123456789ABCDEF")
-var magic = []byte("VPN1")
+var (
+	magic         = []byte("VPN1")
+	clientPrivKey *rsa.PrivateKey
+	serverPubKey  *rsa.PublicKey
+)
+
+func init() {
+	var err error
+	clientPrivKey, err = crypto.LoadPrivateKey("client_private.pem")
+	if err != nil {
+		log.Fatalf("[client] Load private key: %v", err)
+	}
+	pub, err := crypto.LoadPublicKey("server_public.pem")
+	if err != nil {
+		log.Fatalf("[client] Load server public key: %v", err)
+	}
+	serverPubKey = pub
+}
 
 func main() {
 	iface, err := water.New(water.Config{DeviceType: water.TUN})
 	if err != nil {
-		log.Fatalf("[client] Failed to create TUN: %v", err)
+		log.Fatalf("[client] TUN creation failed: %v", err)
 	}
-	fmt.Printf("[client] TUN interface %s created.\n", iface.Name())
+	fmt.Printf("[client] TUN %s created\n", iface.Name())
 
 	conn, err := net.Dial("udp", "10.211.55.7:8080")
 	if err != nil {
-		log.Fatalf("[client] Failed to connect to VPN server: %v", err)
+		log.Fatalf("[client] UDP connect failed: %v", err)
 	}
 	defer conn.Close()
 
 	clientIP, err := sendHandshake(conn)
 	if err != nil {
-		log.Fatal("[client] Handshake failed:", err)
+		log.Fatalf("[client] Handshake failed: %v", err)
 	}
 
-	// Configure TUN interface with assigned IP
-	cmd := exec.Command("ifconfig", iface.Name(), clientIP.String(), "10.0.0.1", "netmask", "255.255.255.0", "up")
-	if err := cmd.Run(); err != nil {
-		log.Fatalf("[client] Failed to configure TUN IP: %v", err)
-	}
+	exec.Command("ifconfig", iface.Name(), clientIP.String(), "10.0.0.1", "netmask", "255.255.255.0", "up").Run()
 
-	vpnCrypto, err := crypto.NewVPNCrypto(sharedKey)
-	if err != nil {
-		log.Fatalf("[client] Failed to init crypto: %v", err)
-	}
+	vpnCrypto, _ := crypto.NewVPNCrypto([]byte("0123456789ABCDEF0123456789ABCDEF"))
+	fmt.Println("[client] Connected to VPN, assigned IP", clientIP)
 
-	buf := make([]byte, 1500)
 	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Println("[client] Goroutine panic:", r)
-			}
-		}()
-
+		buf := make([]byte, 1500)
 		for {
 			n, err := conn.Read(buf)
 			if err != nil {
-				log.Println("[client] Read error from server:", err)
+				log.Println("[client] Read error:", err)
 				continue
 			}
-
-			fmt.Printf("[client] received %d bytes from server\n", n)
-
 			decrypted, err := vpnCrypto.Decrypt(buf[:n])
 			if err != nil {
-				log.Println("[client] Decryption error:", err)
+				log.Println("[client] Decrypt error:", err)
 				continue
 			}
-
-			fmt.Printf("[client] decrypted packet (%d bytes): %x\n", len(decrypted), decrypted)
-
-			_, err = iface.Write(decrypted)
-			if err != nil {
-				log.Println("[client] TUN write error:", err)
-			}
+			iface.Write(decrypted)
 		}
 	}()
 
-	fmt.Println("[client] Connected to VPN server at", conn.RemoteAddr())
-
+	buf := make([]byte, 1500)
 	for {
 		n, err := iface.Read(buf)
 		if err != nil {
-			log.Println("[client] Read error from TUN:", err)
+			log.Println("[client] TUN read error:", err)
 			continue
 		}
-
 		encrypted, err := vpnCrypto.Encrypt(buf[:n])
 		if err != nil {
-			log.Println("[client] Encryption error:", err)
+			log.Println("[client] Encrypt error:", err)
 			continue
 		}
-
-		_, err = conn.Write(encrypted)
-		if err != nil {
-			log.Println("[client] Write error to server:", err)
-		}
+		conn.Write(encrypted)
 	}
 }
 
 func sendHandshake(conn net.Conn) (net.IP, error) {
 	ts := time.Now().Unix()
-	buf := new(bytes.Buffer)
-
+	buf := bytes.NewBuffer(nil)
 	buf.Write(magic)
-	binary.Write(buf, binary.BigEndian, ts)
-	mac := hmac.New(sha256.New, sharedKey)
-	mac.Write(magic)
-	binary.Write(mac, binary.BigEndian, ts)
-	hmacBytes := mac.Sum(nil)
-	buf.Write(hmacBytes)
+	buf.Write(make([]byte, 8))
+	binary.BigEndian.PutUint64(buf.Bytes()[4:], uint64(ts))
 
-	log.Printf("[client] Sent handshake: magic=%x, ts=%d, hmac=%x", magic, ts, hmacBytes)
+	sig, _ := crypto.SignData(clientPrivKey, buf.Bytes()[4:12])
+	buf.Write(sig)
 
-	_, err := conn.Write(buf.Bytes())
+	conn.Write(buf.Bytes())
+
+	resp := make([]byte, 1500)
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, err := conn.Read(resp)
 	if err != nil {
 		return nil, err
 	}
-
-	// Read server response
-	respBuf := make([]byte, 1500)
-	err = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if err != nil {
-		return nil, fmt.Errorf("set read deadline failed: %v", err)
-	}
-	n, err := conn.Read(respBuf)
-	if err != nil {
-		return nil, fmt.Errorf("read response failed: %v", err)
-	}
-
-	log.Printf("[client] Response length: %d bytes, raw=%x", n, respBuf[:n])
-
-	if n < 16+32 {
-		return nil, fmt.Errorf("response too short: %d bytes", n)
-	}
-
-	r := bytes.NewReader(respBuf[:n])
+	r := bytes.NewReader(resp[:n])
 	recvMagic := make([]byte, 4)
 	r.Read(recvMagic)
 	if !bytes.Equal(recvMagic, magic) {
-		return nil, fmt.Errorf("invalid magic in response: %x", recvMagic)
+		return nil, fmt.Errorf("bad magic: %x", recvMagic)
 	}
 
-	var serverTs int64
-	binary.Read(r, binary.BigEndian, &serverTs)
-	if math.Abs(float64(time.Now().Unix()-serverTs)) > 10 {
-		return nil, fmt.Errorf("server timestamp too far off: %d", serverTs)
+	var ts2 int64
+	binary.Read(r, binary.BigEndian, &ts2)
+	if math.Abs(float64(time.Now().Unix()-ts2)) > 10 {
+		return nil, fmt.Errorf("timestamp out of sync")
 	}
 
-	clientIP := make([]byte, 4)
-	r.Read(clientIP)
-
-	mac.Reset()
-	mac.Write(respBuf[:16]) // Magic (4) + timestamp (8) + IP (4)
-	expectedHMAC := mac.Sum(nil)
-	recvHMAC := make([]byte, 32)
-	if _, err := r.Read(recvHMAC); err != nil || len(recvHMAC) != 32 {
-		return nil, fmt.Errorf("failed to read HMAC: %v", err)
+	ipBytes := make([]byte, 4)
+	r.Read(ipBytes)
+	challenge := resp[:4+8+4]
+	sig2 := make([]byte, 256)
+	r.Read(sig2)
+	if err := crypto.VerifySignature(serverPubKey, challenge, sig2); err != nil {
+		return nil, fmt.Errorf("server signature invalid: %v", err)
 	}
 
-	log.Printf("[client] Received response: magic=%x, ts=%d, ip=%v, hmac=%x", recvMagic, serverTs, net.IP(clientIP), recvHMAC)
-	log.Printf("[client] Expected HMAC: %x", expectedHMAC)
-	log.Printf("[client] Data hashed for HMAC: %x", respBuf[:16])
-
-	if !hmac.Equal(expectedHMAC, recvHMAC) {
-		return nil, fmt.Errorf("HMAC mismatch in response")
-	}
-
-	return net.IP(clientIP), nil
+	return net.IP(ipBytes), nil
 }
